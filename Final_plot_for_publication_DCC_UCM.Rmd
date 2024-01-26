@@ -9,6 +9,7 @@ date: "`r Sys.Date()`"
 ---
 
 ```{r loading packages, include=FALSE}
+library(conflicted)
 library(tidyverse)
 library(janitor)
 library(gtsummary)
@@ -23,10 +24,10 @@ library(gtsummary)
 library(gee)
 library(geepack)
 library(glm2)
-library(broom.mixed)
 library(DT)
-install.packages("logistf")
+#install.packages("logistf")
 library(logistf)
+conflicts_prefer(dplyr::filter, broomExtra::tidy)
 ```
 
 ```{r include=FALSE}
@@ -154,11 +155,11 @@ italy_pratesi_2018_two <- logistf(death_discharge_new ~ treatment_cat + GA, data
 saudi_arabia_al_wassia_2016_two <- 
   geeglm(death_discharge_new ~ treatment_cat + GA,
           data =
-            mortality_DCC_UCM_gee[mortality_DCC_UCM_gee$Trial_id =="saudi_arabia_al-wassia_2016",],
+            mortality_DCC_UCM_gee[mortality_DCC_UCM_gee$Trial_id =="saudi_arabia_al_wassia_2016",],
            id = mat_ID,
           family = binomial("logit")) %>%
   tidy() %>% 
-  mutate(Trial_id = "saudi_arabia_al-wassia_2016")
+  mutate(Trial_id = "saudi_arabia_al_wassia_2016")
 
 saudi_arabia_atia_2017_two <-
   geeglm(death_discharge_new ~ treatment_cat  + GA,

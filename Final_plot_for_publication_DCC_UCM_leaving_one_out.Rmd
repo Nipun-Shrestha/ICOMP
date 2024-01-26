@@ -1,0 +1,349 @@
+---
+title: "Meta analysis"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+date: "`r Sys.Date()`"
+---
+
+```{r loading packages, include=FALSE}
+library(conflicted)
+library(tidyverse)
+library(janitor)
+library(gtsummary)
+library(broom.mixed)
+library(RColorBrewer)
+library(knitr)
+library(flextable)
+library(meta)
+library(metafor)
+library(lme4)
+library(gtsummary)
+library(gee)
+library(geepack)
+library(glm2)
+library(DT)
+#install.packages("logistf")
+library(logistf)
+conflicts_prefer(dplyr::filter, broomExtra::tidy)
+```
+
+```{r include=FALSE}
+#fig.pos='htb!',
+opts_chunk$set(#tidy.opts=list(width.cutoff=50),
+               tidy=TRUE,echo = FALSE,fig.pos='htb!',
+               fig.align='center',
+               fig.width=6, 
+               fig.height=3.2,
+               warning = FALSE,
+               cache = TRUE,
+               message = FALSE,
+               error = TRUE)
+```
+
+```{r loading data}
+load("Y:/Systematic Reviews/iCOMP/11. Data/Data from trials/combined_df.rda")
+
+final_df[final_df$Trial_id=="saudi_arabia_al-wassia_2016",]$Trial_id <- "saudi_arabia_al_wassia_2016"
+
+final_df <-
+  final_df %>% 
+  mutate (death_discharge_new = death_discharge_new %>% as_factor())
+
+
+
+final_df <-
+  final_df %>% filter (
+    !Trial_id == "china_hao_2018",
+    !Trial_id == "india_kumar_2016",
+    !Trial_id == "kenya_sura_2020"
+  )
+#trial excluded from the forest plot since they did not have death outcome reported for them
+```
+
+```{r}
+
+summary_DCC_UCM <- 
+  final_df %>% 
+  mutate(treatment_cat = 
+           treatment_cat %>%
+           fct_recode("ICC" = "1",
+                      "DCC" = "2",
+                      "DCC" = "3",
+                      "DCC" = "4",
+                      "UCM" ="5",
+                      "UCM" ="6",
+                      "UCM" ="7",
+                      "UCM" ="8",
+                      "DCC" = "9")) %>% 
+  ungroup %>% mutate(GA_days = GA_days %>% replace_na(3.5)) %>%  
+  filter(!is.na(GA_weeks)) %>% 
+  mutate(GA = (GA_weeks + (GA_days/7)) %>% as.numeric(), mat_ID = if_else(is.na(mat_ID), paste0("uid_", row_number()),                   as.character(mat_ID)))
+
+
+
+DCC_UCM <- 
+  summary_DCC_UCM  %>%
+  select(Trial_id,treatment_cat,death_discharge_new,GA, mat_ID) %>% 
+  filter(treatment_cat %in% c("DCC","UCM")) %>% 
+  mutate(treatment_cat = 
+           treatment_cat %>% fct_drop()) %>% 
+  group_by(Trial_id) %>% 
+  filter(sum(treatment_cat == "DCC") > 0 & 
+           sum(treatment_cat == "UCM") > 0)  %>% ungroup %>% arrange(Trial_id)
+
+
+mortality_DCC_UCM_count <- DCC_UCM %>% group_by(Trial_id,treatment_cat) %>% 
+  mutate(n = n()) %>%# filter(Trial_id == "india_datta_2017")
+  ungroup %>% 
+  # filter(inf_death == 1) %>% 
+  group_by(Trial_id,treatment_cat) %>% 
+  mutate(n_event = sum(death_discharge_new == 1,na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  distinct(Trial_id,treatment_cat,n,n_event) %>%
+  pivot_wider(names_from = treatment_cat,
+              values_from = c(n,n_event)) %>% 
+  select(Trial_id,
+        n_event_DCC, n_DCC, n_event_UCM, n_UCM) 
+ 
+double_zero_trials <-mortality_DCC_UCM_count %>% filter(n_event_DCC == 0 & n_event_UCM == 0) %>% pull(Trial_id) %>% as.vector()
+
+#mortality_DCC_DCC_count <-mortality_DCC_DCC_count %>% filter(!Trial_id %in% double_zero_trials)
+
+counts <- data.frame( ai= mortality_DCC_UCM_count$n_event_UCM,
+bi =mortality_DCC_UCM_count$n_UCM- mortality_DCC_UCM_count$n_event_UCM,
+n1i =mortality_DCC_UCM_count$n_UCM,
+ci=mortality_DCC_UCM_count$n_event_DCC,
+di = mortality_DCC_UCM_count$n_DCC- mortality_DCC_UCM_count$n_event_DCC,
+n2i = mortality_DCC_UCM_count$n_DCC,
+Trial_id=paste(mortality_DCC_UCM_count$Trial_id, sep=" "))
+
+totals_df <- data.frame(ai = sum(counts$ai, na.rm=T),
+                          bi = sum(counts$bi, na.rm=T),
+                          n1i = sum(counts$n1i, na.rm=T),
+                          ci = sum(counts$ci, na.rm=T),
+                          di = sum(counts$di, na.rm=T),
+                          n2i = sum(counts$n2i, na.rm=T),
+                           Trial_id= "Overall")
+
+df <- rbind(counts, totals_df)
+
+```
+
+
+```{r fitting regression model for two stage}
+
+tidy.logistf <- function(x,conf.int = TRUE, conf.level = 0.95, ...) {
+  
+  trash <- utils::capture.output(s <- summary(x))
+  ret <- tibble(
+    term = names(s$coefficients),
+    estimate = s$coefficients,
+    std.error = sqrt(diag(s$var)),
+    p.value = s$prob)
+  
+  if (conf.int) {
+    if (conf.level != x$conflev) {
+      warning("Models of class `logistf` do not allow `glance` to modify the alpha level after fitting the model. Please use the `alpha` argument of the `logistf::logistf` function.")
+    }
+    
+    ci <- confint(x, level = conf.level)
+    ci <- tibble::tibble(
+      term = row.names(ci),
+      conf.low = ci[, 1],
+      conf.high = ci[, 2])
+    
+    ret <- dplyr::left_join(ret, ci, by = "term")
+  }
+  
+  ret
+}
+
+mortality_DCC_UCM_gee <-
+  DCC_UCM %>% 
+  filter(!is.na(death_discharge_new)) %>% 
+  mutate(death_discharge_new = death_discharge_new %>%
+           as.character %>% as.numeric(),
+         treatment_cat = treatment_cat %>% 
+           relevel(ref = "DCC"),
+         # sex = sex %>% as.factor %>% relevel(ref = "1"),
+         mat_ID = mat_ID %>% as.factor()) %>% 
+  # select(Trial_id,infant_ID,mat_ID)
+  arrange(mat_ID)
+
+ireland_finn_2019_two <- logistf(death_discharge_new ~ treatment_cat + GA, data = DCC_UCM [DCC_UCM$Trial_id == "ireland_finn_2019",], family = binomial("logit")) %>% tidy() %>% mutate(Trial_id ="ireland_finn_2019")
+
+italy_pratesi_2018_two <- logistf(death_discharge_new ~ treatment_cat + GA, data = DCC_UCM [DCC_UCM$Trial_id == "italy_pratesi_2018",], family = binomial("logit")) %>% tidy() %>% mutate(Trial_id ="italy_pratesi_2018")
+
+saudi_arabia_al_wassia_2016_two <- 
+  geeglm(death_discharge_new ~ treatment_cat + GA,
+          data =
+            mortality_DCC_UCM_gee[mortality_DCC_UCM_gee$Trial_id =="saudi_arabia_al_wassia_2016",],
+           id = mat_ID,
+          family = binomial("logit")) %>%
+  tidy() %>% 
+  mutate(Trial_id = "saudi_arabia_al_wassia_2016")
+
+saudi_arabia_atia_2017_two <-
+  geeglm(death_discharge_new ~ treatment_cat  + GA,
+      data =
+          mortality_DCC_UCM_gee[mortality_DCC_UCM_gee$Trial_id == 
+                                  "saudi_arabia_atia_2017",],
+      id = mat_ID,
+      family = binomial("logit"),
+      control = geese.control(maxit = 100)
+      ) %>%
+  tidy() %>% 
+  mutate(Trial_id = "saudi_arabia_atia_2017")
+
+thailand_chamnanvanakij_2015_two <- logistf(death_discharge_new ~ treatment_cat + GA, data = DCC_UCM [DCC_UCM$Trial_id == "thailand_chamnanvanakij_2015",], family = binomial("logit")) %>% tidy() %>% mutate(Trial_id ="thailand_chamnanvanakij_2015")
+ 
+
+uk_rabe_2011_two <-
+  geeglm(death_discharge_new ~ treatment_cat  + GA,
+      data =
+          mortality_DCC_UCM_gee[mortality_DCC_UCM_gee$Trial_id == 
+                                  "uk_rabe_2011",],
+      id = mat_ID,
+      family = binomial("logit"),
+      control = geese.control(maxit = 100)
+      ) %>%
+  tidy() %>% 
+  mutate(Trial_id = "uk_rabe_2011")
+
+usa_katheria_premod_2017_two <-
+  geeglm(death_discharge_new ~ treatment_cat  + GA,
+      data =
+          mortality_DCC_UCM_gee[mortality_DCC_UCM_gee$Trial_id == 
+                                  "usa_katheria_premod_2017",],
+      id = mat_ID,
+      family = binomial("logit"),
+      control = geese.control(maxit = 100)
+      ) %>%
+  tidy() %>% 
+  mutate(Trial_id = "usa_katheria_premod_2017")
+
+usa_katheria_premod2_2019_two <-
+  geeglm(death_discharge_new ~ treatment_cat  + GA,
+      data =
+          mortality_DCC_UCM_gee[mortality_DCC_UCM_gee$Trial_id == 
+                                  "usa_katheria_premod2_2019",],
+      id = mat_ID,
+      family = binomial("logit"),
+      control = geese.control(maxit = 100)
+      ) %>%
+  tidy() %>% 
+  mutate(Trial_id = "usa_katheria_premod2_2019")
+
+
+merged_two <- 
+  dplyr::bind_rows(ireland_finn_2019_two,
+            italy_pratesi_2018_two,
+            saudi_arabia_al_wassia_2016_two,
+            saudi_arabia_atia_2017_two,
+            thailand_chamnanvanakij_2015_two,
+            uk_rabe_2011_two,
+            usa_katheria_premod_2017_two,
+            usa_katheria_premod2_2019_two)  %>% 
+  filter(term == "treatment_catUCM") %>% 
+    arrange(Trial_id)
+
+```
+
+```{r two stage meta analysis}
+mortality_DCC_UCM_count_merged <- 
+  df %>% 
+  left_join(merged_two,by = "Trial_id") %>% 
+  mutate(Trial_id_new = 
+           Trial_id %>% 
+           str_replace_all("_"," ") %>%
+           str_to_title() %>% 
+           str_replace(" ", " (") %>%
+           str_replace("$",")") %>% 
+           # str_replace("Aus","Australia") %>% 
+           str_replace("Uk","UK") %>% 
+           str_replace("Usa","USA")
+         # str_replace("Turkey","Türkiye")# %>% 
+         #replace("Overall)","Overall")
+  ) %>% 
+  mutate(Trial_id_new = Trial_id_new %>% 
+           replace(Trial_id_new == "Overall)","Overall") %>%
+           replace(Trial_id_new =="Saudi (Arabia Atia 2017)", "Saudi Arabia (Atia 2017)") %>% 
+           replace(Trial_id_new =="Saudi (Arabia Al Wassia 2016)", "Saudi Arabia (Al Wassia 2016)"))
+
+IPD_DCC_UCM_death_df <- 
+  escalc(yi = estimate, 
+         sei = std.error, 
+         ai= n_events_UCM,
+         bi = n_UCM - n_event_UCM, 
+         n1i = n_UCM ,
+         ci= n_event_DCC, 
+         di = n_DCC - n_event_DCC, 
+         n2i = n_DCC,
+         data = mortality_DCC_UCM_count_merged)
+
+IPD_DCC_UCM_death_df <- IPD_DCC_UCM_death_df %>% arrange (IPD_DCC_UCM_death_df$std.error)
+
+IPD_DCC_UCM_death_df <- IPD_DCC_UCM_death_df %>% mutate(alloc = rev(seq(2, (nrow(IPD_DCC_UCM_death_df)+1))) )
+
+res.IPD <- rma(yi, vi,  data = IPD_DCC_UCM_death_df, method="FE",
+         ai= n_events_UCM,
+           bi = n_UCM - n_event_UCM, 
+           n1i = n_UCM ,
+           ci= n_event_DCC, 
+           di = n_DCC  - n_event_DCC, 
+           n2i = n_DCC, 
+           slab=paste((IPD_DCC_UCM_death_df$Trial_id_new), sep=" "))
+predict (res.IPD, transf = exp, digits=2)
+
+res.IPD1 <- leave1out(res.IPD)
+```
+
+```{r fig.height= 12, fig.width=18, dpi=500}
+
+rma_poly <- res.IPD
+
+#change the left bound after you have run the forest plot once
+left_bound <- -2.5
+#change the right bound after you have run the forest plot once
+right_bound <-2
+
+mlabfun <- function(text, res) {
+   list(bquote(paste(.(text),
+      " (Q = ", .(formatC(res$QE, digits=2, format="f")),
+      ", df = ", .(res$k - res$p),
+      ", p ", .(metafor:::.pval(res$QEp, digits=2, showeq=TRUE, sep=" ")), "; ",
+      I^2, " = ", .(formatC(res$I2, digits=1, format="f")), "%, ",
+      tau^2, " = ", .(formatC(res$tau2, digits=2, format="f")), ")")))}
+
+
+ sav <-forest(res.IPD1$estimate, sei=res.IPD1$se, 
+              atransf = exp, 
+              header=FALSE, 
+              #rows = c(1:(data_height)), 
+              xlab="Leave One Out Estimate",
+              #mlab = "Adjusted Two Stage Fixed Effect Model",
+              xlim = c(left_bound, right_bound),
+              ylim = c(-0.5, 10.5),
+              slab = res.IPD1$slab, 
+              cex = 1.3,#showweights = TRUE, 
+              refline=coef(res.IPD), 
+              annotate = TRUE#,
+              # fonts = 15
+              )
+ par(xpd = NA)
+ 
+
+  text(left_bound, 10, pos=4, cex=1.3, c("Umblical cord milking (UCM) vs Deferred cord clamping (DCC) for primary outcome death before discharge (leaving one out)"), font = 4)
+
+text(2,                     9.5, "Odds Ratio", cex=1.3, pos = 2)
+text(2,                     9,"[95% CI]", cex=1.3, pos = 2)
+#text(1.5,                     14,"Weight", cex=1.3, pos = 2)
+text(-2.2,                     9, "Study", cex=1.3, pos = 2)
+ ### add 'Not estimable' for study with missing log odds ratio
+  #I've made it so it doesn't include the bottom line (totals)
+
+addpoly(rma_poly, row=0, mlab="")    
+```
